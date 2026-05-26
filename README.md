@@ -2,7 +2,7 @@
 
 ## What This Project Is
 
-A **NIFTY index options selling toolkit** built by Rahul (Kumar), running on an Ubuntu server (`MyLabServer`). The primary strategy is **Short Iron Condors** on weekly NIFTY expiries, traded on **Sensibull** and monitored via **Kite Connect (Zerodha) API**. The goal is consistent, disciplined weekly income — hence "Roj Ki Roti" (daily bread).
+A **NIFTY index options selling toolkit** built by Rahul , running on an Ubuntu server (`MyLabServer`). The primary strategy is **Short Iron Condors** on weekly NIFTY expiries, traded on **Sensibull** and monitored via **Kite Connect (Zerodha) API**. The goal is consistent, disciplined weekly income — hence "Roj Ki Roti" (daily bread).
 
 This is NOT auto-execution. All trades are entered manually on Sensibull. The scripts provide analysis, strike selection, automated hourly monitoring with alerts, and performance tracking.
 
