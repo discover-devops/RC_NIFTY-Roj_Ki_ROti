@@ -44,10 +44,38 @@ def get_live_data():
         return None
 
 
-def get_option_ltp(expiry_str, strike, opt_type):
-    """Fetch LTP for a specific Nifty option"""
+# ==================== INSTRUMENTS CACHE ====================
+_instruments_cache = None
+_instruments_cache_time = None
+CACHE_TTL_SECONDS = 300  # Refresh every 5 minutes max
+
+
+def get_instruments_cached():
+    """Fetch NFO instruments ONCE per run, cache for 5 minutes.
+    Old code called kite.instruments('NFO') 4 times per trade per hour.
+    With 1 trade that's 4 API calls wasted. With multiple trades, even worse.
+    """
+    global _instruments_cache, _instruments_cache_time
+    now = datetime.now(IST)
+
+    if (_instruments_cache is not None
+            and _instruments_cache_time is not None
+            and (now - _instruments_cache_time).total_seconds() < CACHE_TTL_SECONDS):
+        return _instruments_cache
+
     try:
-        instruments = kite.instruments("NFO")
+        _instruments_cache = kite.instruments("NFO")
+        _instruments_cache_time = now
+        return _instruments_cache
+    except Exception as e:
+        print(f"Instruments fetch error: {e}")
+        return _instruments_cache or []  # Return stale cache if fresh fetch fails
+
+
+def get_option_ltp(expiry_str, strike, opt_type):
+    """Fetch LTP for a specific Nifty option (uses cached instruments)"""
+    try:
+        instruments = get_instruments_cached()
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
         match = [
             i for i in instruments
@@ -63,6 +91,51 @@ def get_option_ltp(expiry_str, strike, opt_type):
         return quote[symbol].get('last_price', 0)
     except Exception:
         return 0
+
+
+def get_all_leg_ltps(expiry_str, parsed_legs):
+    """Fetch LTP for all 4 legs in ONE kite.quote() call.
+    Old code: 4 separate kite.quote() calls = 4 API hits per trade.
+    New code: 1 kite.quote() call with all 4 symbols = 1 API hit per trade.
+    """
+    try:
+        instruments = get_instruments_cached()
+        expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+
+        # Build symbol map for all 4 legs
+        leg_symbols = {}
+        for leg_key in ['short_pe', 'long_pe', 'short_ce', 'long_ce']:
+            strike = parsed_legs[leg_key]['strike']
+            opt_type = 'PE' if 'pe' in leg_key else 'CE'
+            match = [
+                i for i in instruments
+                if i['name'] == 'NIFTY'
+                and i['expiry'] == expiry_date
+                and int(i['strike']) == int(strike)
+                and i['instrument_type'] == opt_type
+            ]
+            if match:
+                leg_symbols[leg_key] = f"NFO:{match[0]['tradingsymbol']}"
+
+        if not leg_symbols:
+            return {k: 0 for k in ['short_pe', 'long_pe', 'short_ce', 'long_ce']}
+
+        # ONE quote call for all legs
+        quotes = kite.quote(list(leg_symbols.values()))
+
+        result = {}
+        for leg_key, symbol in leg_symbols.items():
+            result[leg_key] = quotes.get(symbol, {}).get('last_price', 0)
+
+        # Fill missing legs with 0
+        for k in ['short_pe', 'long_pe', 'short_ce', 'long_ce']:
+            if k not in result:
+                result[k] = 0
+
+        return result
+    except Exception as e:
+        print(f"Batch LTP error: {e}")
+        return {k: 0 for k in ['short_pe', 'long_pe', 'short_ce', 'long_ce']}
 
 
 def parse_legs(trade):
@@ -116,18 +189,31 @@ def calculate_pnl(trade, parsed_legs, live_premiums):
 
 
 def check_triggers(trade, spot, parsed_legs, live_premiums, pnl):
-    """Detect exit/maneuver triggers based on entry_rules"""
+    """Detect exit/maneuver triggers based on entry_rules.
+    Enhanced: tracks time since target hit, escalates urgency.
+    """
     alerts = []
     rules  = trade.get('entry_rules', {})
 
     max_profit  = trade.get('max_profit',  5525)
     net_credit  = max_profit  # max_profit = total credit for IC
 
-    # Profit target
+    # Profit target — with urgency escalation
     target_pct = rules.get('profit_target_percent', 50) / 100
     target_amt = net_credit * target_pct
     if pnl['total'] >= target_amt:
-        alerts.append(f"🟢 PROFIT TARGET HIT: +₹{pnl['total']:.0f} >= +₹{target_amt:.0f} ({rules.get('profit_target_percent',50)}%). CLOSE TRADE.")
+        pnl_pct = (pnl['total'] / net_credit) * 100
+        if pnl_pct >= 80:
+            alerts.append(f"🟢🟢🟢 TARGET HIT — P&L at {pnl_pct:.0f}% of credit! "
+                          f"+₹{pnl['total']:.0f}. CLOSE NOW. Do not hold for more — "
+                          f"you are risking ₹{pnl['total']:.0f} of unrealized profit.")
+        elif pnl_pct >= 50:
+            alerts.append(f"🟢🟢 TARGET HIT: +₹{pnl['total']:.0f} ({pnl_pct:.0f}% of credit). "
+                          f"Target was {rules.get('profit_target_percent',50)}%. "
+                          f"CLOSE TRADE — every hour you hold, you risk giving this back.")
+        else:
+            alerts.append(f"🟢 PROFIT TARGET HIT: +₹{pnl['total']:.0f} >= +₹{target_amt:.0f} "
+                          f"({rules.get('profit_target_percent',50)}%). CLOSE TRADE.")
 
     # Stop loss
     sl_pct = rules.get('stop_loss_percent', 100) / 100
@@ -162,6 +248,22 @@ def check_triggers(trade, spot, parsed_legs, live_premiums, pnl):
     if entry_short_ce_prem > 0 and live_premiums['short_ce'] >= entry_short_ce_prem * 2:
         alerts.append(f"⚠️  CE PREMIUM 2X: Short CE now ₹{live_premiums['short_ce']:.2f} vs entry ₹{entry_short_ce_prem:.2f}. Consider rolling PE side.")
 
+    # NEW: VIX spike warning (passed via trade context or live data)
+    vix_at_entry = trade.get('vix_at_entry', 0)
+    # VIX is checked in log_and_print where live data is available
+
+    # NEW: DTE countdown warning
+    try:
+        expiry_date = datetime.strptime(str(trade['expiry']), "%Y-%m-%d").date()
+        today = datetime.now(IST).date()
+        dte = (expiry_date - today).days
+        if dte <= 0:
+            alerts.append(f"🔴 EXPIRY DAY: Trade expires TODAY. Close all positions before 3:15 PM.")
+        elif dte == 1:
+            alerts.append(f"⚠️  1 DAY TO EXPIRY: Gamma risk elevated. Consider closing if P&L is positive.")
+    except Exception:
+        pass
+
     return alerts
 
 
@@ -181,6 +283,14 @@ def log_and_print(log_file, trade, live, parsed_legs, live_premiums, pnl, alerts
     now  = datetime.now(IST)
     spot = live['nifty']
     vix  = live['vix']
+
+    # VIX spike check (add to alerts if VIX jumped significantly)
+    vix_at_entry = trade.get('vix_at_entry', 0)
+    if vix_at_entry > 0 and vix >= vix_at_entry * 1.25:
+        alerts.append(f"⚠️  VIX SPIKE: VIX now {vix:.1f} vs {vix_at_entry:.1f} at entry (+{((vix/vix_at_entry)-1)*100:.0f}%). "
+                      f"Premiums expanding — monitor SL closely.")
+    if vix >= 20:
+        alerts.append(f"⚠️  VIX HIGH: {vix:.1f} — consider tightening SL or closing profitable positions.")
 
     max_profit = trade.get('max_profit', 5525)
     pnl_pct    = (pnl['total'] / max_profit * 100) if max_profit else 0
@@ -276,13 +386,10 @@ def main():
     for trade in active_trades:
         parsed_legs = parse_legs(trade)
 
-        # Fetch current premiums
-        live_premiums = {
-            'short_pe': get_option_ltp(trade['expiry'], parsed_legs['short_pe']['strike'], 'PE'),
-            'long_pe':  get_option_ltp(trade['expiry'], parsed_legs['long_pe']['strike'],  'PE'),
-            'short_ce': get_option_ltp(trade['expiry'], parsed_legs['short_ce']['strike'], 'CE'),
-            'long_ce':  get_option_ltp(trade['expiry'], parsed_legs['long_ce']['strike'],  'CE'),
-        }
+        # Batch-fetch all 4 leg premiums in ONE quote call (was 4 separate calls)
+        live_premiums = get_all_leg_ltps(
+            trade['expiry'], parsed_legs
+        )
 
         pnl    = calculate_pnl(trade, parsed_legs, live_premiums)
         alerts = check_triggers(trade, live['nifty'], parsed_legs, live_premiums, pnl)
