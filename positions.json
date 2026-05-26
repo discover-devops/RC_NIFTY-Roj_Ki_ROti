@@ -1,0 +1,60 @@
+{
+  "active_trades": [
+    {
+      "trade_id": "NIFTY_IC_26MAY_001",
+      "strategy": "Short Iron Condor",
+      "symbol": "NIFTY",
+      "expiry": "2026-05-26",
+      "status": "OPEN",
+      "market_view": "Neutral",
+      "entry_spot": 23652.55,
+
+      "legs": [
+        {
+          "action": "BUY",
+          "strike": 22800,
+          "option_type": "PE",
+          "quantity": 260,
+          "premium": 9.95
+        },
+        {
+          "action": "SELL",
+          "strike": 23000,
+          "option_type": "PE",
+          "quantity": 260,
+          "premium": 20.40
+        },
+        {
+          "action": "SELL",
+          "strike": 24200,
+          "option_type": "CE",
+          "quantity": 260,
+          "premium": 18.85
+        },
+        {
+          "action": "BUY",
+          "strike": 24400,
+          "option_type": "CE",
+          "quantity": 260,
+          "premium": 8.05
+        }
+      ],
+
+      "max_profit": 5525,
+      "max_loss": 46475,
+      "breakeven_low": 22979,
+      "breakeven_high": 24221,
+      "pop": 83,
+      "margin_required": 293000,
+
+      "entry_rules": {
+        "profit_target_percent": 35,
+        "stop_loss_percent": 100,
+        "spot_exit_below": 23000,
+        "spot_exit_above": 24200
+      },
+
+      "notes": "Neutral range-bound strategy. Expecting Nifty to remain between 23000 and 24200 till expiry."
+    }
+  ]
+}
